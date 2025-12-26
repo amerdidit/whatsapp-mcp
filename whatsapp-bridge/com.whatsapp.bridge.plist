@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.whatsapp.bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/logs/bridge.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/logs/bridge.error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
