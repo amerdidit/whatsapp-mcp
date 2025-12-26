@@ -12,7 +12,8 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    get_profile_picture as whatsapp_get_profile_picture
 )
 
 # Initialize FastMCP server
@@ -224,16 +225,16 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
-    
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
-    
+
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
-    
+
     if file_path:
         return {
             "success": True,
@@ -245,6 +246,29 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def get_profile_picture(jid: str, is_community: bool = False) -> Dict[str, Any]:
+    """Get the profile picture URL for a WhatsApp user or group.
+
+    Args:
+        jid: The JID of the user or group (e.g., "1234567890@s.whatsapp.net" or "123456789@g.us")
+        is_community: Set to True if requesting a community's profile picture
+
+    Returns:
+        A dictionary containing success status, a message, and the profile picture URL if successful
+    """
+    success, message, url = whatsapp_get_profile_picture(jid, is_community)
+
+    result = {
+        "success": success,
+        "message": message
+    }
+
+    if url:
+        result["url"] = url
+
+    return result
 
 if __name__ == "__main__":
     # Initialize and run the server

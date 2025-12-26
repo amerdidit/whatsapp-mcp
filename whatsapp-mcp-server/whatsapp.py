@@ -765,3 +765,39 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def get_profile_picture(jid: str, is_community: bool = False) -> Tuple[bool, str, Optional[str]]:
+    """
+    Get the profile picture URL for a WhatsApp user or group.
+
+    Args:
+        jid: The JID of the user or group (e.g., "1234567890@s.whatsapp.net" or "123456789@g.us")
+        is_community: Set to True if requesting a community's profile picture
+
+    Returns:
+        Tuple of (success, message, url). URL is None if unsuccessful.
+    """
+    try:
+        if not jid:
+            return False, "JID must be provided", None
+
+        url = f"{WHATSAPP_API_BASE_URL}/profile-picture"
+        payload = {
+            "jid": jid,
+            "is_community": is_community
+        }
+
+        response = requests.post(url, json=payload)
+        result = response.json()
+
+        if response.status_code == 200 and result.get("success"):
+            return True, result.get("message", "Success"), result.get("url")
+        else:
+            return False, result.get("message", f"HTTP {response.status_code}"), None
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None

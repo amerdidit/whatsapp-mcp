@@ -484,6 +484,20 @@ type DownloadMediaResponse struct {
 	Path     string `json:"path,omitempty"`
 }
 
+// ProfilePictureRequest represents the request body for the profile picture API
+type ProfilePictureRequest struct {
+	JID         string `json:"jid"`
+	IsCommunity bool   `json:"is_community,omitempty"`
+}
+
+// ProfilePictureResponse represents the response for the profile picture API
+type ProfilePictureResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	URL     string `json:"url,omitempty"`
+	ID      string `json:"id,omitempty"`
+}
+
 // Store additional media info in the database
 func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	_, err := store.db.Exec(
@@ -771,6 +785,85 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
 			Filename: filename,
 			Path:     path,
+		})
+	})
+
+	// Handler for getting profile pictures
+	http.HandleFunc("/api/profile-picture", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req ProfilePictureRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.JID == "" {
+			http.Error(w, "JID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse the JID
+		jid, err := types.ParseJID(req.JID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ProfilePictureResponse{
+				Success: false,
+				Message: fmt.Sprintf("Invalid JID format: %v", err),
+			})
+			return
+		}
+
+		// Get profile picture info
+		params := &whatsmeow.GetProfilePictureParams{
+			IsCommunity: req.IsCommunity,
+		}
+		pictureInfo, err := client.GetProfilePictureInfo(context.Background(), jid, params)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if err != nil {
+			// Handle specific errors
+			errMsg := err.Error()
+			statusCode := http.StatusInternalServerError
+
+			if strings.Contains(errMsg, "401") {
+				errMsg = "Profile picture not visible (privacy settings)"
+				statusCode = http.StatusForbidden
+			} else if strings.Contains(errMsg, "404") {
+				errMsg = "No profile picture set"
+				statusCode = http.StatusNotFound
+			}
+
+			w.WriteHeader(statusCode)
+			json.NewEncoder(w).Encode(ProfilePictureResponse{
+				Success: false,
+				Message: errMsg,
+			})
+			return
+		}
+
+		if pictureInfo == nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ProfilePictureResponse{
+				Success: false,
+				Message: "No profile picture available",
+			})
+			return
+		}
+
+		json.NewEncoder(w).Encode(ProfilePictureResponse{
+			Success: true,
+			Message: "Profile picture URL retrieved",
+			URL:     pictureInfo.URL,
+			ID:      pictureInfo.ID,
 		})
 	})
 
