@@ -94,19 +94,24 @@ def get_sender_name(sender_jid: str) -> str:
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
-    
+
     if show_chat_info and message.chat_name:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
     else:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
-    content_prefix = ""
+
+    # Always include message ID and chat JID for reactions, plus media type if present
     if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
+        msg_info = f"[{message.media_type}] "
+    else:
+        msg_info = ""
+
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        sender_jid = message.sender if not message.is_from_me else None
+        from_me_flag = "from_me=True" if message.is_from_me else "from_me=False"
+        sender_info = f", sender={sender_jid}" if sender_jid and message.chat_jid.endswith("@g.us") else ""
+        output += f"From: {sender_name}: {msg_info}{message.content} (msg_id={message.id}, chat_jid={message.chat_jid}, {from_me_flag}{sender_info})\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
     return output
@@ -801,3 +806,50 @@ def get_profile_picture(jid: str, is_community: bool = False) -> Tuple[bool, str
         return False, f"Error parsing response: {response.text}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
+
+
+def send_reaction(chat_jid: str, message_id: str, emoji: str, from_me: bool, sender: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Send a reaction to a WhatsApp message.
+
+    Args:
+        chat_jid: The JID of the chat containing the message
+        message_id: The ID of the message to react to
+        emoji: The emoji to react with (empty string to remove reaction)
+        from_me: Whether the message being reacted to was sent by me
+        sender: The sender JID (required for group messages when reacting to others' messages)
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if not message_id:
+            return False, "Message ID must be provided"
+
+        url = f"{WHATSAPP_API_BASE_URL}/react"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "emoji": emoji,
+            "from_me": from_me
+        }
+
+        if sender:
+            payload["sender"] = sender
+
+        response = requests.post(url, json=payload)
+        result = response.json()
+
+        if response.status_code == 200 and result.get("success"):
+            return True, result.get("message", "Reaction sent")
+        else:
+            return False, result.get("message", f"HTTP {response.status_code}")
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"

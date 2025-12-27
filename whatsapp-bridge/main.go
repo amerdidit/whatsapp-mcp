@@ -371,6 +371,52 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
+// Function to send a reaction to a WhatsApp message
+func sendReaction(client *whatsmeow.Client, chatJID, messageID, emoji string, fromMe bool, sender string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Parse the chat JID
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+
+	// Build the message key for the message we're reacting to
+	messageKey := &waProto.MessageKey{
+		RemoteJID: proto.String(chatJID),
+		ID:        proto.String(messageID),
+		FromMe:    proto.Bool(fromMe),
+	}
+
+	// For group messages, we need to include the participant
+	if chat.Server == "g.us" && !fromMe && sender != "" {
+		messageKey.Participant = proto.String(sender)
+	}
+
+	// Create the reaction message
+	// Empty emoji string removes the reaction
+	msg := &waProto.Message{
+		ReactionMessage: &waProto.ReactionMessage{
+			Key:               messageKey,
+			Text:              proto.String(emoji),
+			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+		},
+	}
+
+	// Send the reaction
+	_, err = client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("Error sending reaction: %v", err)
+	}
+
+	if emoji == "" {
+		return true, fmt.Sprintf("Reaction removed from message %s", messageID)
+	}
+	return true, fmt.Sprintf("Reacted with %s to message %s", emoji, messageID)
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -482,6 +528,21 @@ type DownloadMediaResponse struct {
 	Message  string `json:"message"`
 	Filename string `json:"filename,omitempty"`
 	Path     string `json:"path,omitempty"`
+}
+
+// ReactToMessageRequest represents the request body for the react API
+type ReactToMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	Emoji     string `json:"emoji"`
+	FromMe    bool   `json:"from_me"`
+	Sender    string `json:"sender,omitempty"` // Required for group messages
+}
+
+// ReactToMessageResponse represents the response for the react API
+type ReactToMessageResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 // ProfilePictureRequest represents the request body for the profile picture API
@@ -864,6 +925,45 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Message: "Profile picture URL retrieved",
 			URL:     pictureInfo.URL,
 			ID:      pictureInfo.ID,
+		})
+	})
+
+	// Handler for reacting to messages
+	http.HandleFunc("/api/react", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req ReactToMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and Message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		// Send the reaction
+		success, message := sendReaction(client, req.ChatJID, req.MessageID, req.Emoji, req.FromMe, req.Sender)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(ReactToMessageResponse{
+			Success: success,
+			Message: message,
 		})
 	})
 

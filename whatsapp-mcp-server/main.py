@@ -13,7 +13,8 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
-    get_profile_picture as whatsapp_get_profile_picture
+    get_profile_picture as whatsapp_get_profile_picture,
+    send_reaction as whatsapp_send_reaction
 )
 
 # Initialize FastMCP server
@@ -269,6 +270,32 @@ def get_profile_picture(jid: str, is_community: bool = False) -> Dict[str, Any]:
         result["url"] = url
 
     return result
+
+@mcp.tool()
+def react_to_message(
+    chat_jid: str,
+    message_id: str,
+    emoji: str,
+    from_me: bool,
+    sender: Optional[str] = None
+) -> Dict[str, Any]:
+    """React to a WhatsApp message with an emoji.
+
+    Args:
+        chat_jid: The JID of the chat containing the message (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        message_id: The ID of the message to react to
+        emoji: The emoji to react with (e.g., "👍", "❤️", "😂"). Use empty string to remove reaction.
+        from_me: Whether the message being reacted to was sent by you (True) or received (False)
+        sender: The sender's JID - required for group chats when reacting to others' messages
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, message = whatsapp_send_reaction(chat_jid, message_id, emoji, from_me, sender)
+    return {
+        "success": success,
+        "message": message
+    }
 
 if __name__ == "__main__":
     # Initialize and run the server
