@@ -16,7 +16,8 @@ from whatsapp import (
     get_profile_picture as whatsapp_get_profile_picture,
     send_reaction as whatsapp_send_reaction,
     edit_message as whatsapp_edit_message,
-    revoke_message as whatsapp_revoke_message
+    revoke_message as whatsapp_revoke_message,
+    send_chat_presence as whatsapp_send_chat_presence
 )
 
 # Initialize FastMCP server
@@ -339,6 +340,26 @@ def revoke_message(
         A dictionary containing success status and a status message
     """
     success, message = whatsapp_revoke_message(chat_jid, message_id)
+    return {
+        "success": success,
+        "message": message
+    }
+
+@mcp.tool()
+def send_typing_indicator(
+    chat_jid: str,
+    state: str = "composing"
+) -> Dict[str, Any]:
+    """Send a typing indicator to a WhatsApp chat.
+
+    Args:
+        chat_jid: The JID of the chat (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        state: The typing state - "composing" (typing) or "paused" (stopped typing). Defaults to "composing".
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, message = whatsapp_send_chat_presence(chat_jid, state)
     return {
         "success": success,
         "message": message

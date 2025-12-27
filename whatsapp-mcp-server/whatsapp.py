@@ -894,6 +894,45 @@ def revoke_message(chat_jid: str, message_id: str) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
+def send_chat_presence(chat_jid: str, state: str) -> Tuple[bool, str]:
+    """
+    Send chat presence (typing indicator) to a chat.
+
+    Args:
+        chat_jid: The JID of the chat
+        state: The presence state - "composing" (typing) or "paused" (stopped typing)
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if state not in ("composing", "paused"):
+            return False, "State must be 'composing' or 'paused'"
+
+        url = f"{WHATSAPP_API_BASE_URL}/presence"
+        payload = {
+            "chat_jid": chat_jid,
+            "state": state
+        }
+
+        response = requests.post(url, json=payload)
+        result = response.json()
+
+        if response.status_code == 200 and result.get("success"):
+            return True, result.get("message", "Presence sent")
+        else:
+            return False, result.get("message", f"HTTP {response.status_code}")
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def edit_message(chat_jid: str, message_id: str, new_content: str) -> Tuple[bool, str]:
     """
     Edit a WhatsApp message.
