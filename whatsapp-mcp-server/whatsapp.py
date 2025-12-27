@@ -627,33 +627,33 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str) -> Tuple[bool, str, Optional[str]]:
     try:
         # Validate input
         if not recipient:
-            return False, "Recipient must be provided"
-        
+            return False, "Recipient must be provided", None
+
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "message": message,
         }
-        
+
         response = requests.post(url, json=payload)
-        
+
         # Check if the request was successful
         if response.status_code == 200:
             result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
+            return result.get("success", False), result.get("message", "Unknown response"), result.get("message_id")
         else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+            return False, f"Error: HTTP {response.status_code} - {response.text}", None
+
     except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
+        return False, f"Request error: {str(e)}", None
     except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
+        return False, f"Error parsing response: {response.text}", None
     except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        return False, f"Unexpected error: {str(e)}", None
 
 def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
     try:
@@ -844,6 +844,49 @@ def send_reaction(chat_jid: str, message_id: str, emoji: str, from_me: bool, sen
 
         if response.status_code == 200 and result.get("success"):
             return True, result.get("message", "Reaction sent")
+        else:
+            return False, result.get("message", f"HTTP {response.status_code}")
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def edit_message(chat_jid: str, message_id: str, new_content: str) -> Tuple[bool, str]:
+    """
+    Edit a WhatsApp message.
+
+    Args:
+        chat_jid: The JID of the chat containing the message
+        message_id: The ID of the message to edit
+        new_content: The new content for the message
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if not message_id:
+            return False, "Message ID must be provided"
+        if not new_content:
+            return False, "New content must be provided"
+
+        url = f"{WHATSAPP_API_BASE_URL}/edit"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "new_content": new_content
+        }
+
+        response = requests.post(url, json=payload)
+        result = response.json()
+
+        if response.status_code == 200 and result.get("success"):
+            return True, result.get("message", "Message edited")
         else:
             return False, result.get("message", f"HTTP {response.status_code}")
 

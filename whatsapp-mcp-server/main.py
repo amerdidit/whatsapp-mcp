@@ -14,7 +14,8 @@ from whatsapp import (
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
     get_profile_picture as whatsapp_get_profile_picture,
-    send_reaction as whatsapp_send_reaction
+    send_reaction as whatsapp_send_reaction,
+    edit_message as whatsapp_edit_message
 )
 
 # Initialize FastMCP server
@@ -167,9 +168,9 @@ def send_message(
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
-    
+
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status, a status message, and the message_id if successful
     """
     # Validate input
     if not recipient:
@@ -177,13 +178,16 @@ def send_message(
             "success": False,
             "message": "Recipient must be provided"
         }
-    
+
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
-    return {
+    success, status_message, message_id = whatsapp_send_message(recipient, message)
+    result = {
         "success": success,
         "message": status_message
     }
+    if message_id:
+        result["message_id"] = message_id
+    return result
 
 @mcp.tool()
 def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
@@ -292,6 +296,28 @@ def react_to_message(
         A dictionary containing success status and a status message
     """
     success, message = whatsapp_send_reaction(chat_jid, message_id, emoji, from_me, sender)
+    return {
+        "success": success,
+        "message": message
+    }
+
+@mcp.tool()
+def edit_message(
+    chat_jid: str,
+    message_id: str,
+    new_content: str
+) -> Dict[str, Any]:
+    """Edit a WhatsApp message you previously sent.
+
+    Args:
+        chat_jid: The JID of the chat containing the message (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        message_id: The ID of the message to edit (must be your own message)
+        new_content: The new text content for the message
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, message = whatsapp_edit_message(chat_jid, message_id, new_content)
     return {
         "success": success,
         "message": message

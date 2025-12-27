@@ -191,8 +191,9 @@ func extractTextContent(msg *waProto.Message) string {
 
 // SendMessageResponse represents the response for the send message API
 type SendMessageResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -203,9 +204,9 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", ""
 	}
 
 	// Create JID for recipient
@@ -219,7 +220,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), ""
 		}
 	} else {
 		// Create JID from phone number
@@ -236,7 +237,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
+			return false, fmt.Sprintf("Error reading media file: %v", err), ""
 		}
 
 		// Determine media type and mime type based on file extension
@@ -285,7 +286,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err)
+			return false, fmt.Sprintf("Error uploading media: %v", err), ""
 		}
 
 		fmt.Println("Media uploaded", resp)
@@ -315,7 +316,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 					seconds = analyzedSeconds
 					waveform = analyzedWaveform
 				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
+					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), ""
 				}
 			} else {
 				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
@@ -362,13 +363,50 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	sendResp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+		return false, fmt.Sprintf("Error sending message: %v", err), ""
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	// Store the sent message in the database
+	chatJID := recipientJID.String()
+	messageID := sendResp.ID
+
+	// Determine media type for storage
+	var mediaType, filename, url string
+	var mediaKey, fileSHA256, fileEncSHA256 []byte
+	var fileLength uint64
+
+	if mediaPath != "" {
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg)
+	}
+
+	// Store in database
+	err = messageStore.StoreMessage(
+		messageID,
+		chatJID,
+		client.Store.ID.User, // sender is us
+		message,
+		sendResp.Timestamp,
+		true, // isFromMe
+		mediaType,
+		filename,
+		url,
+		mediaKey,
+		fileSHA256,
+		fileEncSHA256,
+		fileLength,
+	)
+	if err != nil {
+		// Log but don't fail - message was sent successfully
+		fmt.Printf("Warning: Failed to store sent message: %v\n", err)
+	}
+
+	// Also update the chat's last message time
+	messageStore.StoreChat(chatJID, "", sendResp.Timestamp)
+
+	return true, fmt.Sprintf("Message sent to %s", recipient), messageID
 }
 
 // Function to send a reaction to a WhatsApp message
@@ -415,6 +453,32 @@ func sendReaction(client *whatsmeow.Client, chatJID, messageID, emoji string, fr
 		return true, fmt.Sprintf("Reaction removed from message %s", messageID)
 	}
 	return true, fmt.Sprintf("Reacted with %s to message %s", emoji, messageID)
+}
+
+// Function to edit a WhatsApp message
+func editMessage(client *whatsmeow.Client, chatJID, messageID, newContent string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Parse the chat JID
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+
+	// Build the edit message
+	msg := client.BuildEdit(chat, messageID, &waProto.Message{
+		Conversation: proto.String(newContent),
+	})
+
+	// Send the edit
+	_, err = client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("Error editing message: %v", err)
+	}
+
+	return true, fmt.Sprintf("Message %s edited successfully", messageID)
 }
 
 // Extract media info from a message
@@ -541,6 +605,19 @@ type ReactToMessageRequest struct {
 
 // ReactToMessageResponse represents the response for the react API
 type ReactToMessageResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// EditMessageRequest represents the request body for the edit message API
+type EditMessageRequest struct {
+	ChatJID    string `json:"chat_jid"`
+	MessageID  string `json:"message_id"`
+	NewContent string `json:"new_content"`
+}
+
+// EditMessageResponse represents the response for the edit message API
+type EditMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
@@ -781,8 +858,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
+		success, message, messageID := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
+		fmt.Println("Message sent", success, message, "ID:", messageID)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -793,8 +870,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+			Success:   success,
+			Message:   message,
+			MessageID: messageID,
 		})
 	})
 
@@ -962,6 +1040,50 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send response
 		json.NewEncoder(w).Encode(ReactToMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for editing messages
+	http.HandleFunc("/api/edit", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req EditMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and Message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		if req.NewContent == "" {
+			http.Error(w, "New content is required", http.StatusBadRequest)
+			return
+		}
+
+		// Edit the message
+		success, message := editMessage(client, req.ChatJID, req.MessageID, req.NewContent)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(EditMessageResponse{
 			Success: success,
 			Message: message,
 		})
