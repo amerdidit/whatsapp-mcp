@@ -855,6 +855,45 @@ def send_reaction(chat_jid: str, message_id: str, emoji: str, from_me: bool, sen
         return False, f"Unexpected error: {str(e)}"
 
 
+def revoke_message(chat_jid: str, message_id: str) -> Tuple[bool, str]:
+    """
+    Revoke/delete a WhatsApp message for everyone.
+
+    Args:
+        chat_jid: The JID of the chat containing the message
+        message_id: The ID of the message to delete
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if not message_id:
+            return False, "Message ID must be provided"
+
+        url = f"{WHATSAPP_API_BASE_URL}/revoke"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id
+        }
+
+        response = requests.post(url, json=payload)
+        result = response.json()
+
+        if response.status_code == 200 and result.get("success"):
+            return True, result.get("message", "Message deleted")
+        else:
+            return False, result.get("message", f"HTTP {response.status_code}")
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def edit_message(chat_jid: str, message_id: str, new_content: str) -> Tuple[bool, str]:
     """
     Edit a WhatsApp message.

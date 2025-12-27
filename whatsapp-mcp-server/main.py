@@ -15,7 +15,8 @@ from whatsapp import (
     download_media as whatsapp_download_media,
     get_profile_picture as whatsapp_get_profile_picture,
     send_reaction as whatsapp_send_reaction,
-    edit_message as whatsapp_edit_message
+    edit_message as whatsapp_edit_message,
+    revoke_message as whatsapp_revoke_message
 )
 
 # Initialize FastMCP server
@@ -318,6 +319,26 @@ def edit_message(
         A dictionary containing success status and a status message
     """
     success, message = whatsapp_edit_message(chat_jid, message_id, new_content)
+    return {
+        "success": success,
+        "message": message
+    }
+
+@mcp.tool()
+def revoke_message(
+    chat_jid: str,
+    message_id: str
+) -> Dict[str, Any]:
+    """Delete a WhatsApp message for everyone (revoke).
+
+    Args:
+        chat_jid: The JID of the chat containing the message (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        message_id: The ID of the message to delete (must be your own message)
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, message = whatsapp_revoke_message(chat_jid, message_id)
     return {
         "success": success,
         "message": message

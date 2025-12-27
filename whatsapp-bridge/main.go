@@ -481,6 +481,27 @@ func editMessage(client *whatsmeow.Client, chatJID, messageID, newContent string
 	return true, fmt.Sprintf("Message %s edited successfully", messageID)
 }
 
+// Function to revoke/delete a WhatsApp message
+func revokeMessage(client *whatsmeow.Client, chatJID, messageID string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	// Parse the chat JID
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("Error parsing chat JID: %v", err)
+	}
+
+	// Revoke the message (delete for everyone)
+	_, err = client.RevokeMessage(context.Background(), chat, messageID)
+	if err != nil {
+		return false, fmt.Sprintf("Error revoking message: %v", err)
+	}
+
+	return true, fmt.Sprintf("Message %s deleted successfully", messageID)
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -618,6 +639,18 @@ type EditMessageRequest struct {
 
 // EditMessageResponse represents the response for the edit message API
 type EditMessageResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+// RevokeMessageRequest represents the request body for the revoke/delete message API
+type RevokeMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+}
+
+// RevokeMessageResponse represents the response for the revoke/delete message API
+type RevokeMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
@@ -1084,6 +1117,45 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send response
 		json.NewEncoder(w).Encode(EditMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for revoking/deleting messages
+	http.HandleFunc("/api/revoke", func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse the request body
+		var req RevokeMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		// Validate request
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Chat JID and Message ID are required", http.StatusBadRequest)
+			return
+		}
+
+		// Revoke the message
+		success, message := revokeMessage(client, req.ChatJID, req.MessageID)
+
+		// Set response headers
+		w.Header().Set("Content-Type", "application/json")
+
+		// Set appropriate status code
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+
+		// Send response
+		json.NewEncoder(w).Encode(RevokeMessageResponse{
 			Success: success,
 			Message: message,
 		})
