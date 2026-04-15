@@ -45,6 +45,7 @@ uv sync
 ### JID Format
 - Individual chats: `{phone_number}@s.whatsapp.net`
 - Group chats: `{group_id}@g.us`
+- LID (Linked Device ID) chats: `{lid}@lid` - WhatsApp now uses LID addressing for some users. The bridge resolves these to phone-number JIDs before storing. The whatsmeow session DB (`store/whatsapp.db`) has a `whatsmeow_lid_map` table with LID-to-phone mappings. The MCP server can also resolve LIDs via this table for backward compatibility.
 
 ## MCP Tools Exposed
 
@@ -62,3 +63,43 @@ Write operations (call Go bridge API):
 - `httpx`, `requests` - HTTP clients for bridge communication
 - Go bridge must be running on `localhost:8080`
 - FFmpeg (optional) - for audio format conversion
+
+## macOS Daemon Setup
+
+The Go bridge can run as a LaunchAgent daemon (auto-starts at login):
+
+```bash
+# Install and start daemon
+../whatsapp-bridge/setup-daemon.sh
+
+# Check if running
+launchctl list | grep whatsapp
+
+# Start/stop manually
+launchctl start com.whatsapp.bridge
+launchctl stop com.whatsapp.bridge
+```
+
+## Troubleshooting
+
+### Bridge not receiving messages
+If the bridge is running but not receiving new messages (e.g., database shows old messages only), the WhatsApp session may have expired. Re-authenticate:
+
+```bash
+# Interactive re-authentication (displays QR code)
+../whatsapp-bridge/authenticate.sh
+
+# Scan QR code with WhatsApp, then Ctrl+C and restart daemon:
+launchctl load ~/Library/LaunchAgents/com.whatsapp.bridge.plist
+```
+
+### Check bridge status
+```bash
+# Is daemon loaded?
+launchctl list | grep whatsapp
+# Output: PID  ExitCode  Label
+# "-" for PID means not running
+
+# Check logs
+tail -f ../whatsapp-bridge/bridge.log
+```

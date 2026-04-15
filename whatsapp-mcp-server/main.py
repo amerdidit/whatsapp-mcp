@@ -17,7 +17,10 @@ from whatsapp import (
     send_reaction as whatsapp_send_reaction,
     edit_message as whatsapp_edit_message,
     revoke_message as whatsapp_revoke_message,
-    send_chat_presence as whatsapp_send_chat_presence
+    send_chat_presence as whatsapp_send_chat_presence,
+    list_labels as whatsapp_list_labels,
+    get_chat_labels as whatsapp_get_chat_labels,
+    get_chats_by_label as whatsapp_get_chats_by_label
 )
 
 # Initialize FastMCP server
@@ -80,23 +83,26 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    label_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
-    
+
     Args:
         query: Optional search term to filter chats by name or JID
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        label_id: Optional label ID to filter chats by (only returns chats with this label)
     """
     chats = whatsapp_list_chats(
         query=query,
         limit=limit,
         page=page,
         include_last_message=include_last_message,
-        sort_by=sort_by
+        sort_by=sort_by,
+        label_id=label_id
     )
     return chats
 
@@ -364,6 +370,70 @@ def send_typing_indicator(
         "success": success,
         "message": message
     }
+
+
+@mcp.tool()
+def list_labels() -> List[Dict[str, Any]]:
+    """List all WhatsApp labels.
+
+    Returns:
+        A list of labels with their id, name, color, and order_index
+    """
+    labels = whatsapp_list_labels()
+    return [
+        {
+            "id": label.id,
+            "name": label.name,
+            "color": label.color,
+            "predefined_id": label.predefined_id,
+            "order_index": label.order_index
+        }
+        for label in labels
+    ]
+
+
+@mcp.tool()
+def get_chat_labels(chat_jid: str) -> List[Dict[str, Any]]:
+    """Get labels assigned to a specific WhatsApp chat.
+
+    Args:
+        chat_jid: The JID of the chat (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+
+    Returns:
+        A list of labels assigned to the chat
+    """
+    labels = whatsapp_get_chat_labels(chat_jid)
+    return [
+        {
+            "id": label.id,
+            "name": label.name,
+            "color": label.color,
+            "predefined_id": label.predefined_id,
+            "order_index": label.order_index
+        }
+        for label in labels
+    ]
+
+
+@mcp.tool()
+def get_chats_by_label(
+    label_id: str,
+    limit: int = 20,
+    page: int = 0
+) -> List[Dict[str, Any]]:
+    """Get WhatsApp chats that have a specific label assigned.
+
+    Args:
+        label_id: The ID of the label to filter by
+        limit: Maximum number of chats to return (default 20)
+        page: Page number for pagination (default 0)
+
+    Returns:
+        A list of chats with the specified label
+    """
+    chats = whatsapp_get_chats_by_label(label_id, limit, page)
+    return chats
+
 
 if __name__ == "__main__":
     # Initialize and run the server
