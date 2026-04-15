@@ -751,7 +751,7 @@ func resolveLIDJID(ctx context.Context, client *whatsmeow.Client, lidJID types.J
 
 	// Try the alternative JID first (from SenderAlt/RecipientAlt)
 	if !alt.IsEmpty() && alt.Server == types.DefaultUserServer {
-		logger.Infof("Resolved LID %s to phone %s via alt JID", lidJID, alt)
+		logger.Debugf("Resolved LID %s to phone %s via alt JID", lidJID, alt)
 		return alt
 	}
 
@@ -766,7 +766,7 @@ func resolveLIDJID(ctx context.Context, client *whatsmeow.Client, lidJID types.J
 		return lidJID
 	}
 
-	logger.Infof("Resolved LID %s to phone %s via LID map", lidJID, pnJID)
+	logger.Debugf("Resolved LID %s to phone %s via LID map", lidJID, pnJID)
 	return pnJID
 }
 
@@ -784,7 +784,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		resolvedChat := resolveLIDJID(ctx, client, msg.Info.Chat, msg.Info.RecipientAlt, logger)
 		if resolvedChat.Server == types.DefaultUserServer {
 			chatJID = resolvedChat.String()
-			logger.Infof("Resolved LID chat %s -> %s", msg.Info.Chat, chatJID)
+			logger.Debugf("Resolved LID chat %s -> %s", msg.Info.Chat, chatJID)
 		}
 	}
 
@@ -793,7 +793,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		resolvedSender := resolveLIDJID(ctx, client, msg.Info.Sender, msg.Info.SenderAlt, logger)
 		if resolvedSender.Server == types.DefaultUserServer {
 			sender = resolvedSender.User
-			logger.Infof("Resolved LID sender %s -> %s", msg.Info.Sender, sender)
+			logger.Debugf("Resolved LID sender %s -> %s", msg.Info.Sender, sender)
 		}
 	}
 
@@ -1820,7 +1820,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		pnJID, err := client.Store.LIDs.GetPNForLID(context.Background(), jid.ToNonAD())
 		if err == nil && !pnJID.IsEmpty() {
 			lookupJID = pnJID
-			logger.Infof("Resolved LID %s to %s for contact lookup", jid, pnJID)
+			logger.Debugf("Resolved LID %s to %s for contact lookup", jid, pnJID)
 		}
 	}
 

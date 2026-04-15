@@ -29,7 +29,8 @@ def resolve_lid_to_phone(lid_user: str) -> Optional[str]:
         if result and result[0]:
             return result[0]
         return None
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        print(f"LID lookup error: {e}")
         return None
     finally:
         if 'conn' in locals():
@@ -137,32 +138,24 @@ def get_sender_name(sender_jid: str) -> str:
 
             result = cursor.fetchone()
 
-        # If still no result and it looks like a LID, try resolving to phone
-        if not result:
-            if '@' in sender_jid:
-                user_part = sender_jid.split('@')[0]
-                server_part = sender_jid.split('@')[1] if '@' in sender_jid else ''
-            else:
-                user_part = sender_jid
-                server_part = ''
+        # If still no result and sender is a LID, try resolving to phone number
+        if not result and '@' in sender_jid and sender_jid.split('@')[1] == 'lid':
+            lid_user = sender_jid.split('@')[0]
+            resolved_phone = resolve_lid_to_phone(lid_user)
+            if resolved_phone:
+                # Look up the phone-number-based JID
+                pn_jid = f"{resolved_phone}@s.whatsapp.net"
+                cursor.execute("""
+                    SELECT name
+                    FROM chats
+                    WHERE jid = ?
+                    LIMIT 1
+                """, (pn_jid,))
+                result = cursor.fetchone()
 
-            # Try LID -> phone resolution
-            if server_part == 'lid' or not result:
-                resolved_phone = resolve_lid_to_phone(user_part)
-                if resolved_phone:
-                    # Look up the phone-number-based JID
-                    pn_jid = f"{resolved_phone}@s.whatsapp.net"
-                    cursor.execute("""
-                        SELECT name
-                        FROM chats
-                        WHERE jid = ?
-                        LIMIT 1
-                    """, (pn_jid,))
-                    result = cursor.fetchone()
-
-                    if not result:
-                        # Return the phone number as a fallback
-                        return resolved_phone
+                if not result:
+                    # Return the phone number as a fallback
+                    return resolved_phone
 
         if result and result[0]:
             return result[0]

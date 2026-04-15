@@ -14,6 +14,7 @@ The --dry-run flag shows what would be changed without modifying the database.
 """
 
 import sqlite3
+import shutil
 import sys
 import os
 
@@ -70,6 +71,12 @@ def migrate(dry_run=False):
     if not lid_to_phone:
         print("No LID mappings found. Nothing to migrate.")
         return
+
+    # Back up the database before making changes
+    if not dry_run:
+        backup_path = MESSAGES_DB + '.bak'
+        shutil.copy2(MESSAGES_DB, backup_path)
+        print(f"Backed up database to {backup_path}")
 
     conn = sqlite3.connect(MESSAGES_DB)
     conn.execute("PRAGMA foreign_keys = OFF")  # Disable FK constraints during migration
@@ -139,9 +146,14 @@ def migrate(dry_run=False):
         """, (pn_jid, lid_jid, pn_jid))
         moved = cursor.rowcount
 
-        # Delete any remaining messages under the old LID JID (duplicates)
-        cursor.execute("DELETE FROM messages WHERE chat_jid = ?", (lid_jid,))
-        dupes = cursor.rowcount
+        # Log and delete any remaining messages under the old LID JID (duplicates)
+        cursor.execute("SELECT id, sender, timestamp FROM messages WHERE chat_jid = ?", (lid_jid,))
+        dupe_rows = cursor.fetchall()
+        dupes = len(dupe_rows)
+        for dupe_id, dupe_sender, dupe_ts in dupe_rows:
+            print(f"    DUPE DROPPED: msg_id={dupe_id} sender={dupe_sender} ts={dupe_ts}")
+        if dupes > 0:
+            cursor.execute("DELETE FROM messages WHERE chat_jid = ?", (lid_jid,))
 
         # Migrate chat_labels
         cursor.execute("""
@@ -179,11 +191,16 @@ def migrate(dry_run=False):
             print(f"  SKIP: No phone mapping for sender {lid_sender}")
             continue
 
-        print(f"  Sender {lid_sender} -> {phone}")
-        if not dry_run:
+        if dry_run:
+            cursor.execute("SELECT COUNT(*) FROM messages WHERE sender = ?", (lid_sender,))
+            count = cursor.fetchone()[0]
+            print(f"  Sender {lid_sender} -> {phone} ({count} messages)")
+            migrated_senders += count
+        else:
             cursor.execute("UPDATE messages SET sender = ? WHERE sender = ?",
                            (phone, lid_sender))
             migrated_senders += cursor.rowcount
+            print(f"  Sender {lid_sender} -> {phone} ({cursor.rowcount} messages)")
 
     if not dry_run:
         conn.commit()
