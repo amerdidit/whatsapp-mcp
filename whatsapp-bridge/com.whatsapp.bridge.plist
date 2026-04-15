@@ -7,11 +7,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge</string>
+        <string>/Users/amer/Code/mcp/whatsapp/whatsapp-bridge/whatsapp-bridge</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge</string>
+    <string>/Users/amer/Code/mcp/whatsapp/whatsapp-bridge</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -20,10 +20,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/logs/bridge.log</string>
+    <string>/Users/amer/Code/mcp/whatsapp/whatsapp-bridge/logs/bridge.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/amer/Code/whatsapp-mcp/whatsapp-bridge/logs/bridge.error.log</string>
+    <string>/Users/amer/Code/mcp/whatsapp/whatsapp-bridge/logs/bridge.error.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

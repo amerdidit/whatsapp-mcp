@@ -66,7 +66,7 @@ func NewMessageStore() (*MessageStore, error) {
 			name TEXT,
 			last_message_time TIMESTAMP
 		);
-		
+
 		CREATE TABLE IF NOT EXISTS messages (
 			id TEXT,
 			chat_jid TEXT,
@@ -83,6 +83,25 @@ func NewMessageStore() (*MessageStore, error) {
 			file_length INTEGER,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+		);
+
+		CREATE TABLE IF NOT EXISTS labels (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			color INTEGER DEFAULT 0,
+			predefined_id TEXT,
+			order_index INTEGER DEFAULT 0,
+			deleted BOOLEAN DEFAULT 0,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS chat_labels (
+			chat_jid TEXT NOT NULL,
+			label_id TEXT NOT NULL,
+			labeled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (chat_jid, label_id),
+			FOREIGN KEY (chat_jid) REFERENCES chats(jid),
+			FOREIGN KEY (label_id) REFERENCES labels(id)
 		);
 	`)
 	if err != nil {
@@ -172,8 +191,158 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	return chats, nil
 }
 
+// Label represents a WhatsApp label
+type Label struct {
+	ID           string
+	Name         string
+	Color        int32
+	PredefinedID string
+	OrderIndex   int32
+	Deleted      bool
+	UpdatedAt    time.Time
+}
+
+// Store or update a label in the database
+func (store *MessageStore) StoreLabel(id, name string, color, orderIndex int32, predefinedID string, deleted bool) error {
+	_, err := store.db.Exec(
+		`INSERT OR REPLACE INTO labels (id, name, color, predefined_id, order_index, deleted, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, name, color, predefinedID, orderIndex, deleted, time.Now(),
+	)
+	return err
+}
+
+// Get all labels from the database
+func (store *MessageStore) GetLabels() ([]Label, error) {
+	rows, err := store.db.Query(
+		"SELECT id, name, color, predefined_id, order_index, deleted, updated_at FROM labels WHERE deleted = 0 ORDER BY order_index",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var labels []Label
+	for rows.Next() {
+		var label Label
+		var predefinedID sql.NullString
+		err := rows.Scan(&label.ID, &label.Name, &label.Color, &predefinedID, &label.OrderIndex, &label.Deleted, &label.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if predefinedID.Valid {
+			label.PredefinedID = predefinedID.String
+		}
+		labels = append(labels, label)
+	}
+
+	return labels, nil
+}
+
+// Store a chat-label association
+func (store *MessageStore) StoreChatLabel(chatJID, labelID string) error {
+	_, err := store.db.Exec(
+		"INSERT OR REPLACE INTO chat_labels (chat_jid, label_id, labeled_at) VALUES (?, ?, ?)",
+		chatJID, labelID, time.Now(),
+	)
+	return err
+}
+
+// Remove a chat-label association
+func (store *MessageStore) RemoveChatLabel(chatJID, labelID string) error {
+	_, err := store.db.Exec(
+		"DELETE FROM chat_labels WHERE chat_jid = ? AND label_id = ?",
+		chatJID, labelID,
+	)
+	return err
+}
+
+// Get labels for a specific chat
+func (store *MessageStore) GetChatLabels(chatJID string) ([]Label, error) {
+	rows, err := store.db.Query(`
+		SELECT l.id, l.name, l.color, l.predefined_id, l.order_index, l.deleted, l.updated_at
+		FROM labels l
+		JOIN chat_labels cl ON l.id = cl.label_id
+		WHERE cl.chat_jid = ? AND l.deleted = 0
+		ORDER BY l.order_index
+	`, chatJID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var labels []Label
+	for rows.Next() {
+		var label Label
+		var predefinedID sql.NullString
+		err := rows.Scan(&label.ID, &label.Name, &label.Color, &predefinedID, &label.OrderIndex, &label.Deleted, &label.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if predefinedID.Valid {
+			label.PredefinedID = predefinedID.String
+		}
+		labels = append(labels, label)
+	}
+
+	return labels, nil
+}
+
+// Get all chat JIDs that have a specific label
+func (store *MessageStore) GetChatsWithLabel(labelID string) ([]string, error) {
+	rows, err := store.db.Query(
+		"SELECT chat_jid FROM chat_labels WHERE label_id = ?",
+		labelID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chatJIDs []string
+	for rows.Next() {
+		var jid string
+		err := rows.Scan(&jid)
+		if err != nil {
+			return nil, err
+		}
+		chatJIDs = append(chatJIDs, jid)
+	}
+
+	return chatJIDs, nil
+}
+
+// unwrapMessage unwraps ephemeral, view-once, and other wrapper message types
+// to get the inner message. This is needed for history sync messages which
+// aren't automatically unwrapped like real-time events.
+func unwrapMessage(msg *waProto.Message) *waProto.Message {
+	if msg == nil {
+		return nil
+	}
+	if inner := msg.GetEphemeralMessage().GetMessage(); inner != nil {
+		msg = inner
+	}
+	if inner := msg.GetViewOnceMessage().GetMessage(); inner != nil {
+		msg = inner
+	}
+	if inner := msg.GetViewOnceMessageV2().GetMessage(); inner != nil {
+		msg = inner
+	}
+	if inner := msg.GetViewOnceMessageV2Extension().GetMessage(); inner != nil {
+		msg = inner
+	}
+	if inner := msg.GetDocumentWithCaptionMessage().GetMessage(); inner != nil {
+		msg = inner
+	}
+	if inner := msg.GetEditedMessage().GetMessage(); inner != nil {
+		msg = inner
+	}
+	return msg
+}
+
 // Extract text content from a message
 func extractTextContent(msg *waProto.Message) string {
+	msg = unwrapMessage(msg)
 	if msg == nil {
 		return ""
 	}
@@ -536,6 +705,7 @@ func sendChatPresence(client *whatsmeow.Client, chatJID, state string) (bool, st
 
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+	msg = unwrapMessage(msg)
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
@@ -571,19 +741,75 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 	return "", "", "", nil, nil, nil, 0
 }
 
+// resolveLIDJID resolves a LID JID to its phone-number-based JID.
+// It first checks SenderAlt/RecipientAlt from the message source, then falls back to the LID map.
+// Returns the original JID if resolution fails or the JID is not a LID.
+func resolveLIDJID(ctx context.Context, client *whatsmeow.Client, lidJID types.JID, alt types.JID, logger waLog.Logger) types.JID {
+	if lidJID.Server != types.HiddenUserServer {
+		return lidJID
+	}
+
+	// Try the alternative JID first (from SenderAlt/RecipientAlt)
+	if !alt.IsEmpty() && alt.Server == types.DefaultUserServer {
+		logger.Debugf("Resolved LID %s to phone %s via alt JID", lidJID, alt)
+		return alt
+	}
+
+	// Fall back to the LID map in the store
+	pnJID, err := client.Store.LIDs.GetPNForLID(ctx, lidJID.ToNonAD())
+	if err != nil {
+		logger.Warnf("Failed to look up phone number for LID %s: %v", lidJID, err)
+		return lidJID
+	}
+	if pnJID.IsEmpty() {
+		logger.Warnf("No phone number mapping found for LID %s", lidJID)
+		return lidJID
+	}
+
+	logger.Debugf("Resolved LID %s to phone %s via LID map", lidJID, pnJID)
+	return pnJID
+}
+
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+	ctx := context.Background()
+
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
 
+	// Resolve LID JIDs to phone-number JIDs
+	if msg.Info.Chat.Server == types.HiddenUserServer {
+		// For DM chats with LID addressing, resolve to phone number JID
+		resolvedChat := resolveLIDJID(ctx, client, msg.Info.Chat, msg.Info.RecipientAlt, logger)
+		if resolvedChat.Server == types.DefaultUserServer {
+			chatJID = resolvedChat.String()
+			logger.Debugf("Resolved LID chat %s -> %s", msg.Info.Chat, chatJID)
+		}
+	}
+
+	// Resolve LID sender to phone number
+	if msg.Info.Sender.Server == types.HiddenUserServer {
+		resolvedSender := resolveLIDJID(ctx, client, msg.Info.Sender, msg.Info.SenderAlt, logger)
+		if resolvedSender.Server == types.DefaultUserServer {
+			sender = resolvedSender.User
+			logger.Debugf("Resolved LID sender %s -> %s", msg.Info.Sender, sender)
+		}
+	}
+
+	// Parse the (possibly resolved) chat JID for name lookup
+	resolvedJID, err := types.ParseJID(chatJID)
+	if err != nil {
+		resolvedJID = msg.Info.Chat
+	}
+
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+	name := GetChatName(client, messageStore, resolvedJID, chatJID, nil, sender, logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
-	if err != nil {
-		logger.Warnf("Failed to store chat: %v", err)
+	storeErr := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
+	if storeErr != nil {
+		logger.Warnf("Failed to store chat: %v", storeErr)
 	}
 
 	// Extract text content
@@ -598,7 +824,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	}
 
 	// Store message in database
-	err = messageStore.StoreMessage(
+	storeErr = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
 		sender,
@@ -614,8 +840,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileLength,
 	)
 
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
+	if storeErr != nil {
+		logger.Warnf("Failed to store message: %v", storeErr)
 	} else {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
@@ -1249,6 +1475,123 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	// Handler for listing all labels
+	http.HandleFunc("/api/labels", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		labels, err := messageStore.GetLabels()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to get labels: %v", err),
+			})
+			return
+		}
+
+		// Convert labels to response format
+		labelList := make([]map[string]interface{}, 0, len(labels))
+		for _, label := range labels {
+			labelMap := map[string]interface{}{
+				"id":          label.ID,
+				"name":        label.Name,
+				"color":       label.Color,
+				"order_index": label.OrderIndex,
+			}
+			if label.PredefinedID != "" {
+				labelMap["predefined_id"] = label.PredefinedID
+			}
+			labelList = append(labelList, labelMap)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"labels":  labelList,
+		})
+	})
+
+	// Handler for getting labels for a specific chat
+	http.HandleFunc("/api/labels/chat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		chatJID := r.URL.Query().Get("chat_jid")
+		if chatJID == "" {
+			http.Error(w, "chat_jid parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		labels, err := messageStore.GetChatLabels(chatJID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to get chat labels: %v", err),
+			})
+			return
+		}
+
+		// Convert labels to response format
+		labelList := make([]map[string]interface{}, 0, len(labels))
+		for _, label := range labels {
+			labelMap := map[string]interface{}{
+				"id":          label.ID,
+				"name":        label.Name,
+				"color":       label.Color,
+				"order_index": label.OrderIndex,
+			}
+			if label.PredefinedID != "" {
+				labelMap["predefined_id"] = label.PredefinedID
+			}
+			labelList = append(labelList, labelMap)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"labels":  labelList,
+		})
+	})
+
+	// Handler for getting chats with a specific label
+	http.HandleFunc("/api/labels/chats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		labelID := r.URL.Query().Get("label_id")
+		if labelID == "" {
+			http.Error(w, "label_id parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		chatJIDs, err := messageStore.GetChatsWithLabel(labelID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to get chats with label: %v", err),
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"chat_jids": chatJIDs,
+		})
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -1259,6 +1602,63 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+}
+
+// Handle label edit events (create/update/delete labels)
+func handleLabelEdit(messageStore *MessageStore, evt *events.LabelEdit, logger waLog.Logger) {
+	if evt == nil || evt.Action == nil {
+		return
+	}
+
+	labelID := evt.LabelID
+	name := evt.Action.GetName()
+	color := evt.Action.GetColor()
+	predefinedID := fmt.Sprintf("%d", evt.Action.GetPredefinedID())
+	deleted := evt.Action.GetDeleted()
+	orderIndex := evt.Action.GetOrderIndex()
+
+	logger.Infof("Label event: ID=%s, Name=%s, Color=%d, Deleted=%v", labelID, name, color, deleted)
+
+	err := messageStore.StoreLabel(labelID, name, color, orderIndex, predefinedID, deleted)
+	if err != nil {
+		logger.Warnf("Failed to store label: %v", err)
+	} else {
+		if deleted {
+			logger.Infof("Deleted label: %s (%s)", name, labelID)
+		} else {
+			logger.Infof("Stored label: %s (%s)", name, labelID)
+		}
+	}
+}
+
+// Handle label association events (add/remove labels from chats)
+func handleLabelAssociationChat(messageStore *MessageStore, evt *events.LabelAssociationChat, logger waLog.Logger) {
+	if evt == nil || evt.Action == nil {
+		return
+	}
+
+	chatJID := evt.JID.String()
+	labelID := evt.LabelID
+	labeled := evt.Action.GetLabeled()
+
+	logger.Infof("Label association event: ChatJID=%s, LabelID=%s, Labeled=%v", chatJID, labelID, labeled)
+
+	var err error
+	if labeled {
+		err = messageStore.StoreChatLabel(chatJID, labelID)
+		if err == nil {
+			logger.Infof("Added label %s to chat %s", labelID, chatJID)
+		}
+	} else {
+		err = messageStore.RemoveChatLabel(chatJID, labelID)
+		if err == nil {
+			logger.Infof("Removed label %s from chat %s", labelID, chatJID)
+		}
+	}
+
+	if err != nil {
+		logger.Warnf("Failed to update chat label association: %v", err)
+	}
 }
 
 func main() {
@@ -1325,6 +1725,12 @@ func main() {
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
+
+		case *events.LabelEdit:
+			handleLabelEdit(messageStore, v, logger)
+
+		case *events.LabelAssociationChat:
+			handleLabelAssociationChat(messageStore, v, logger)
 		}
 	})
 
@@ -1408,6 +1814,16 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		return existingName
 	}
 
+	// If this is a LID JID, try to resolve to phone number for contact lookup
+	lookupJID := jid
+	if jid.Server == types.HiddenUserServer {
+		pnJID, err := client.Store.LIDs.GetPNForLID(context.Background(), jid.ToNonAD())
+		if err == nil && !pnJID.IsEmpty() {
+			lookupJID = pnJID
+			logger.Debugf("Resolved LID %s to %s for contact lookup", jid, pnJID)
+		}
+	}
+
 	// Need to determine chat name
 	var name string
 
@@ -1462,16 +1878,26 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
+		// Try contact lookup with the resolved phone-number JID first
+		contact, err := client.Store.Contacts.GetContact(context.Background(), lookupJID)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
-			name = jid.User
+		} else if lookupJID != jid {
+			// If we used a resolved JID, also try the original LID JID
+			contact, err = client.Store.Contacts.GetContact(context.Background(), jid)
+			if err == nil && contact.FullName != "" {
+				name = contact.FullName
+			}
+		}
+
+		if name == "" {
+			if sender != "" {
+				// Fallback to sender
+				name = sender
+			} else {
+				// Last fallback to JID user (prefer phone number if resolved)
+				name = lookupJID.User
+			}
 		}
 
 		logger.Infof("Using contact name: %s", name)
@@ -1483,6 +1909,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
+	ctx := context.Background()
 
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
@@ -1498,6 +1925,16 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		if err != nil {
 			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
 			continue
+		}
+
+		// Resolve LID JIDs to phone-number JIDs for history sync
+		if jid.Server == types.HiddenUserServer {
+			resolvedJID := resolveLIDJID(ctx, client, jid, types.EmptyJID, logger)
+			if resolvedJID.Server == types.DefaultUserServer {
+				chatJID = resolvedJID.String()
+				jid = resolvedJID
+				logger.Infof("Resolved history sync LID chat -> %s", chatJID)
+			}
 		}
 
 		// Get appropriate chat name by passing the history sync conversation directly
@@ -1564,6 +2001,16 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					}
 					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
 						sender = *msg.Message.Key.Participant
+						// Resolve LID participant to phone number
+						if strings.Contains(sender, "@"+types.HiddenUserServer) {
+							participantJID, parseErr := types.ParseJID(sender)
+							if parseErr == nil {
+								resolvedParticipant := resolveLIDJID(ctx, client, participantJID, types.EmptyJID, logger)
+								if resolvedParticipant.Server == types.DefaultUserServer {
+									sender = resolvedParticipant.User
+								}
+							}
+						}
 					} else if isFromMe {
 						sender = client.Store.ID.User
 					} else {
