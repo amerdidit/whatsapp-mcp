@@ -23,6 +23,7 @@ import (
 	"bytes"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -310,6 +311,45 @@ func (store *MessageStore) GetChatsWithLabel(labelID string) ([]string, error) {
 	}
 
 	return chatJIDs, nil
+}
+
+// Get a single label by ID
+func (store *MessageStore) GetLabel(labelID string) (*Label, error) {
+	var label Label
+	var predefinedID sql.NullString
+	err := store.db.QueryRow(
+		"SELECT id, name, color, predefined_id, order_index, deleted, updated_at FROM labels WHERE id = ?",
+		labelID,
+	).Scan(&label.ID, &label.Name, &label.Color, &predefinedID, &label.OrderIndex, &label.Deleted, &label.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if predefinedID.Valid {
+		label.PredefinedID = predefinedID.String
+	}
+	return &label, nil
+}
+
+// Get the next available label ID (max existing + 1)
+func (store *MessageStore) GetNextLabelID() (string, error) {
+	var maxID sql.NullInt64
+	err := store.db.QueryRow("SELECT MAX(CAST(id AS INTEGER)) FROM labels").Scan(&maxID)
+	if err != nil {
+		return "", err
+	}
+	if !maxID.Valid {
+		return "1", nil
+	}
+	return fmt.Sprintf("%d", maxID.Int64+1), nil
+}
+
+// Remove all chat-label associations for a label (used on label delete)
+func (store *MessageStore) RemoveChatLabelsForLabel(labelID string) error {
+	_, err := store.db.Exec("DELETE FROM chat_labels WHERE label_id = ?", labelID)
+	return err
 }
 
 // unwrapMessage unwraps ephemeral, view-once, and other wrapper message types
@@ -937,6 +977,31 @@ type ProfilePictureResponse struct {
 	Message string `json:"message"`
 	URL     string `json:"url,omitempty"`
 	ID      string `json:"id,omitempty"`
+}
+
+type CreateLabelRequest struct {
+	Name  string `json:"name"`
+	Color int32  `json:"color"`
+}
+
+type EditLabelRequest struct {
+	LabelID string  `json:"label_id"`
+	Name    *string `json:"name,omitempty"`
+	Color   *int32  `json:"color,omitempty"`
+}
+
+type DeleteLabelRequest struct {
+	LabelID string `json:"label_id"`
+}
+
+type AssignLabelRequest struct {
+	ChatJID string `json:"chat_jid"`
+	LabelID string `json:"label_id"`
+}
+
+type RemoveLabelRequest struct {
+	ChatJID string `json:"chat_jid"`
+	LabelID string `json:"label_id"`
 }
 
 // Store additional media info in the database
@@ -1589,6 +1654,375 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"chat_jids": chatJIDs,
+		})
+	})
+
+	// Handler for creating a new label
+	http.HandleFunc("/api/labels/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req CreateLabelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if req.Color < 0 || req.Color > 19 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Color must be between 0 and 19",
+			})
+			return
+		}
+
+		// Generate next label ID
+		newID, err := messageStore.GetNextLabelID()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to generate label ID: %v", err),
+			})
+			return
+		}
+
+		// Send to WhatsApp via app state
+		patch := appstate.BuildLabelEdit(newID, req.Name, req.Color, false)
+		err = client.SendAppState(context.Background(), patch)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to sync with WhatsApp: %v", err),
+			})
+			return
+		}
+
+		// Update local DB
+		err = messageStore.StoreLabel(newID, req.Name, req.Color, 0, "", false)
+		if err != nil {
+			fmt.Printf("Warning: label created on WhatsApp but failed to store locally: %v\n", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"label": map[string]interface{}{
+				"id":    newID,
+				"name":  req.Name,
+				"color": req.Color,
+			},
+		})
+	})
+
+	// Handler for editing a label (rename/recolor)
+	http.HandleFunc("/api/labels/edit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req EditLabelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.LabelID == "" {
+			http.Error(w, "label_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch current label
+		label, err := messageStore.GetLabel(req.LabelID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+		if label == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Label not found",
+			})
+			return
+		}
+
+		// Check if predefined
+		if label.PredefinedID != "" && label.PredefinedID != "0" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Cannot modify predefined label",
+			})
+			return
+		}
+
+		// Merge fields
+		name := label.Name
+		color := label.Color
+		if req.Name != nil {
+			name = *req.Name
+		}
+		if req.Color != nil {
+			if *req.Color < 0 || *req.Color > 19 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": "Color must be between 0 and 19",
+				})
+				return
+			}
+			color = *req.Color
+		}
+
+		// Send to WhatsApp
+		patch := appstate.BuildLabelEdit(req.LabelID, name, color, false)
+		err = client.SendAppState(context.Background(), patch)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to sync with WhatsApp: %v", err),
+			})
+			return
+		}
+
+		// Update local DB
+		err = messageStore.StoreLabel(req.LabelID, name, color, label.OrderIndex, label.PredefinedID, false)
+		if err != nil {
+			fmt.Printf("Warning: label edited on WhatsApp but failed to store locally: %v\n", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"label": map[string]interface{}{
+				"id":    req.LabelID,
+				"name":  name,
+				"color": color,
+			},
+		})
+	})
+
+	// Handler for deleting a label
+	http.HandleFunc("/api/labels/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req DeleteLabelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.LabelID == "" {
+			http.Error(w, "label_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// Fetch current label
+		label, err := messageStore.GetLabel(req.LabelID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+		if label == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Label not found",
+			})
+			return
+		}
+
+		// Check if predefined
+		if label.PredefinedID != "" && label.PredefinedID != "0" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Cannot delete predefined label",
+			})
+			return
+		}
+
+		// Send to WhatsApp
+		patch := appstate.BuildLabelEdit(req.LabelID, label.Name, label.Color, true)
+		err = client.SendAppState(context.Background(), patch)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to sync with WhatsApp: %v", err),
+			})
+			return
+		}
+
+		// Update local DB — mark deleted and remove associations
+		messageStore.StoreLabel(req.LabelID, label.Name, label.Color, label.OrderIndex, label.PredefinedID, true)
+		messageStore.RemoveChatLabelsForLabel(req.LabelID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Label deleted",
+		})
+	})
+
+	// Handler for assigning a label to a chat
+	http.HandleFunc("/api/labels/assign", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req AssignLabelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.LabelID == "" {
+			http.Error(w, "chat_jid and label_id are required", http.StatusBadRequest)
+			return
+		}
+
+		// Validate label exists
+		label, err := messageStore.GetLabel(req.LabelID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+		if label == nil || label.Deleted {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Label not found",
+			})
+			return
+		}
+
+		// Parse JID
+		targetJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Invalid chat JID format: %v", err),
+			})
+			return
+		}
+
+		// Send to WhatsApp
+		patch := appstate.BuildLabelChat(targetJID, req.LabelID, true)
+		err = client.SendAppState(context.Background(), patch)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to sync with WhatsApp: %v", err),
+			})
+			return
+		}
+
+		// Update local DB
+		messageStore.StoreChatLabel(req.ChatJID, req.LabelID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Label assigned",
+		})
+	})
+
+	// Handler for removing a label from a chat
+	http.HandleFunc("/api/labels/remove", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req RemoveLabelRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.LabelID == "" {
+			http.Error(w, "chat_jid and label_id are required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse JID
+		targetJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Invalid chat JID format: %v", err),
+			})
+			return
+		}
+
+		// Send to WhatsApp
+		patch := appstate.BuildLabelChat(targetJID, req.LabelID, false)
+		err = client.SendAppState(context.Background(), patch)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to sync with WhatsApp: %v", err),
+			})
+			return
+		}
+
+		// Update local DB
+		messageStore.RemoveChatLabel(req.ChatJID, req.LabelID)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Label removed",
 		})
 	})
 
