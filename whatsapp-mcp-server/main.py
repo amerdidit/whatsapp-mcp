@@ -1,4 +1,8 @@
 from typing import List, Dict, Any, Optional
+import json
+import os
+import subprocess
+import tempfile
 from mcp.server.fastmcp import FastMCP
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
@@ -264,6 +268,77 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+WHISPER_MODELS = {"tiny", "base", "small", "medium", "large"}
+
+@mcp.tool()
+def transcribe_audio(message_id: str, chat_jid: str, model: str = "small", language: Optional[str] = None) -> Dict[str, Any]:
+    """Download and transcribe a voice note or audio message using Whisper.
+
+    Args:
+        message_id: The ID of the message containing the audio
+        chat_jid: The JID of the chat containing the message
+        model: Whisper model size: tiny, base, small, medium, large (default: small)
+        language: Optional language code (e.g., "en", "ar", "de"). Auto-detected if not set.
+
+    Returns:
+        A dictionary with the transcription text and metadata
+    """
+    if model not in WHISPER_MODELS:
+        return {"success": False, "message": f"Invalid model '{model}'. Choose from: {', '.join(sorted(WHISPER_MODELS))}"}
+
+    # Download the audio file first
+    file_path = whatsapp_download_media(message_id, chat_jid)
+    if not file_path:
+        return {"success": False, "message": "Failed to download audio"}
+
+    if not os.path.exists(file_path):
+        return {"success": False, "message": f"Downloaded file not found: {file_path}"}
+
+    # Use a temp directory to avoid output collisions and ensure cleanup
+    output_dir = tempfile.mkdtemp(prefix="whisper_")
+
+    try:
+        # Build whisper command
+        cmd = ["whisper", file_path, "--model", model, "--output_format", "json", "--output_dir", output_dir]
+        if language:
+            cmd.extend(["--language", language])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            return {"success": False, "message": f"Whisper failed: {result.stderr[-500:] if result.stderr else 'unknown error'}"}
+
+        # Read the JSON output
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        json_path = os.path.join(output_dir, f"{base_name}.json")
+
+        if not os.path.exists(json_path):
+            # Fall back to txt output
+            txt_path = os.path.join(output_dir, f"{base_name}.txt")
+            if os.path.exists(txt_path):
+                with open(txt_path) as f:
+                    return {"success": True, "text": f.read().strip(), "file_path": file_path}
+            return {"success": False, "message": "Whisper produced no output"}
+
+        with open(json_path) as f:
+            whisper_output = json.load(f)
+
+        return {
+            "success": True,
+            "text": whisper_output.get("text", "").strip(),
+            "language": whisper_output.get("language", "unknown"),
+            "segments": [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in whisper_output.get("segments", [])],
+            "file_path": file_path
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"success": False, "message": "Transcription timed out (5 min limit)"}
+    except Exception as e:
+        return {"success": False, "message": f"Transcription error: {str(e)}"}
+    finally:
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 @mcp.tool()
 def get_profile_picture(jid: str, is_community: bool = False) -> Dict[str, Any]:
