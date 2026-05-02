@@ -1249,3 +1249,113 @@ def get_chats_by_label(label_id: str, limit: int = 20, page: int = 0) -> List[Ch
     finally:
         if 'conn' in locals():
             conn.close()
+
+
+def create_label(name: str, color: int = 0) -> Tuple[bool, str, Optional[dict]]:
+    """Create a new WhatsApp label via bridge API."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/labels/create"
+        payload = {"name": name, "color": color}
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", ""), result.get("label")
+        else:
+            try:
+                error_data = response.json()
+                return False, error_data.get("message", f"HTTP {response.status_code}"), None
+            except json.JSONDecodeError:
+                return False, f"HTTP {response.status_code}: {response.text}", None
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+
+
+def edit_label(label_id: str, name: Optional[str] = None, color: Optional[int] = None) -> Tuple[bool, str, Optional[dict]]:
+    """Edit an existing WhatsApp label (rename/recolor) via bridge API."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/labels/edit"
+        payload = {"label_id": label_id}
+        if name is not None:
+            payload["name"] = name
+        if color is not None:
+            payload["color"] = color
+
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", ""), result.get("label")
+        else:
+            try:
+                error_data = response.json()
+                return False, error_data.get("message", f"HTTP {response.status_code}"), None
+            except json.JSONDecodeError:
+                return False, f"HTTP {response.status_code}: {response.text}", None
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+
+
+def delete_label(label_id: str) -> Tuple[bool, str]:
+    """Delete a WhatsApp label via bridge API."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/labels/delete"
+        payload = {"label_id": label_id}
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            try:
+                error_data = response.json()
+                return False, error_data.get("message", f"HTTP {response.status_code}")
+            except json.JSONDecodeError:
+                return False, f"HTTP {response.status_code}: {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def assign_label(chat_jid: str, label_id: str) -> Tuple[bool, str]:
+    """Assign a label to a chat via bridge API."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/labels/assign"
+        payload = {"chat_jid": chat_jid, "label_id": label_id}
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            try:
+                error_data = response.json()
+                return False, error_data.get("message", f"HTTP {response.status_code}")
+            except json.JSONDecodeError:
+                return False, f"HTTP {response.status_code}: {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def remove_label(chat_jid: str, label_id: str) -> Tuple[bool, str]:
+    """Remove a label from a chat via bridge API."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/labels/remove"
+        payload = {"chat_jid": chat_jid, "label_id": label_id}
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            try:
+                error_data = response.json()
+                return False, error_data.get("message", f"HTTP {response.status_code}")
+            except json.JSONDecodeError:
+                return False, f"HTTP {response.status_code}: {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"

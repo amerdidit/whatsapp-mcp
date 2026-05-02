@@ -20,7 +20,12 @@ from whatsapp import (
     send_chat_presence as whatsapp_send_chat_presence,
     list_labels as whatsapp_list_labels,
     get_chat_labels as whatsapp_get_chat_labels,
-    get_chats_by_label as whatsapp_get_chats_by_label
+    get_chats_by_label as whatsapp_get_chats_by_label,
+    create_label as whatsapp_create_label,
+    edit_label as whatsapp_edit_label,
+    delete_label as whatsapp_delete_label,
+    assign_label as whatsapp_assign_label,
+    remove_label as whatsapp_remove_label
 )
 
 # Initialize FastMCP server
@@ -433,6 +438,87 @@ def get_chats_by_label(
     """
     chats = whatsapp_get_chats_by_label(label_id, limit, page)
     return chats
+
+
+@mcp.tool()
+def create_label(name: str, color: int = 0) -> dict:
+    """Create a new WhatsApp label.
+
+    Args:
+        name: Label name (e.g., "Investor", "🏪 Vendors")
+        color: Color index 0-19 (default 0)
+
+    Returns:
+        A dictionary with success status and the created label details
+    """
+    success, message, label = whatsapp_create_label(name, color)
+    result = {"success": success, "message": message}
+    if label:
+        result["label"] = label
+    return result
+
+
+@mcp.tool()
+def edit_label(label_id: str, name: str = None, color: int = None) -> dict:
+    """Rename or recolor an existing WhatsApp label.
+
+    Args:
+        label_id: The label ID to edit (use list_labels to find IDs)
+        name: New name (optional, keeps current if omitted)
+        color: New color index 0-19 (optional, keeps current if omitted)
+
+    Returns:
+        A dictionary with success status and the updated label details
+    """
+    success, message, label = whatsapp_edit_label(label_id, name=name, color=color)
+    result = {"success": success, "message": message}
+    if label:
+        result["label"] = label
+    return result
+
+
+@mcp.tool()
+def delete_label(label_id: str) -> dict:
+    """Delete a WhatsApp label. Cannot delete predefined/system labels.
+
+    Args:
+        label_id: The label ID to delete (use list_labels to find IDs)
+
+    Returns:
+        A dictionary with success status and a status message
+    """
+    success, message = whatsapp_delete_label(label_id)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def assign_label(chat_jid: str, label_id: str) -> dict:
+    """Assign a label to a WhatsApp chat.
+
+    Args:
+        chat_jid: The JID of the chat (e.g., "491234567890@s.whatsapp.net" or "123456789-987654321@g.us")
+        label_id: The label ID to assign (use list_labels to find IDs)
+
+    Returns:
+        A dictionary with success status and a status message
+    """
+    success, message = whatsapp_assign_label(chat_jid, label_id)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def remove_label(chat_jid: str, label_id: str) -> dict:
+    """Remove a label from a WhatsApp chat.
+
+    Args:
+        chat_jid: The JID of the chat
+        label_id: The label ID to remove
+
+    Returns:
+        A dictionary with success status and a status message
+    """
+    success, message = whatsapp_remove_label(chat_jid, label_id)
+    return {"success": success, "message": message}
 
 
 if __name__ == "__main__":
