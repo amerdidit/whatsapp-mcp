@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Optional
+import glob
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from mcp.server.fastmcp import FastMCP
@@ -271,6 +273,25 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
 
 WHISPER_MODELS = {"tiny", "base", "small", "medium", "large"}
 
+
+def resolve_whisper_bin() -> str:
+    """Locate the whisper CLI.
+
+    A bare "whisper" hits the pyenv shim, which resolves against this
+    directory's .python-version (3.11). That interpreter is not installed and
+    does not have whisper, so the shim fails before whisper ever runs. Prefer
+    an explicit override, then any real binary under a pyenv version dir.
+    """
+    override = os.environ.get("WHISPER_BIN")
+    if override:
+        return override
+
+    for candidate in sorted(glob.glob(os.path.expanduser("~/.pyenv/versions/*/bin/whisper"))):
+        if os.access(candidate, os.X_OK):
+            return candidate
+
+    return shutil.which("whisper") or "whisper"
+
 @mcp.tool()
 def transcribe_audio(message_id: str, chat_jid: str, model: str = "small", language: Optional[str] = None) -> Dict[str, Any]:
     """Download and transcribe a voice note or audio message using Whisper.
@@ -300,7 +321,7 @@ def transcribe_audio(message_id: str, chat_jid: str, model: str = "small", langu
 
     try:
         # Build whisper command
-        cmd = ["whisper", file_path, "--model", model, "--output_format", "json", "--output_dir", output_dir]
+        cmd = [resolve_whisper_bin(), file_path, "--model", model, "--output_format", "json", "--output_dir", output_dir]
         if language:
             cmd.extend(["--language", language])
 
