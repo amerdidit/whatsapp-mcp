@@ -1195,6 +1195,90 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// appStateConflict reports whether an error from SendAppState indicates the local
+// copy of an app-state collection is stale or corrupted (server 409 conflict or a
+// mismatching LTHash). These are recoverable by forcing a full re-sync.
+func appStateConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "conflict") ||
+		strings.Contains(msg, "LTHash") ||
+		strings.Contains(msg, "mismatching")
+}
+
+// isLTHashMismatch reports whether an app-state error is a corrupted-hash error
+// that a normal (re-)sync cannot fix. The only reliable recovery is to request a
+// fresh authoritative copy of the collection from the primary device (the phone).
+func isLTHashMismatch(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "mismatching LTHash")
+}
+
+// recoverAppState asks the primary device (the phone) to send an authoritative,
+// unencrypted copy of an app-state collection. whatsmeow handles the response
+// asynchronously (see handleAppStateRecovery): it overwrites the corrupted local
+// version/LTHash and, because EmitAppStateEventsOnFullSync is set, dispatches the
+// mutations as events so chat_labels gets repopulated. Recovery is async — the
+// phone must be online, and the response arrives on the normal event stream.
+func recoverAppState(client *whatsmeow.Client, name appstate.WAPatchName) error {
+	msg := whatsmeow.BuildAppStateRecoveryRequest(name)
+	_, err := client.SendPeerMessage(context.Background(), msg)
+	return err
+}
+
+// syncRegularAppState brings the `regular` collection (labels + chat/label
+// associations) up to date. It first tries a normal full sync; if that fails with
+// a mismatching LTHash — a corrupted state a resync cannot repair — it falls back
+// to requesting a fatal recovery from the phone.
+func syncRegularAppState(client *whatsmeow.Client, logger waLog.Logger) {
+	// onlyIfNotSynced=true: skip when the collection already has a stored version,
+	// so we never wipe a good (e.g. recovered) state on restart. Live incremental
+	// patches keep it fresh while connected. Only a never-synced collection triggers
+	// a full fetch here, whose LTHash failure falls through to recovery below.
+	err := client.FetchAppState(context.Background(), appstate.WAPatchRegular, false, true)
+	if err == nil {
+		logger.Infof("Synced 'regular' app state (labels + chat/label associations)")
+		return
+	}
+	if !isLTHashMismatch(err) {
+		logger.Warnf("Failed to sync 'regular' app state: %v", err)
+		return
+	}
+	logger.Warnf("'regular' app state has a corrupted LTHash (%v); requesting fatal recovery from phone", err)
+	if rerr := recoverAppState(client, appstate.WAPatchRegular); rerr != nil {
+		logger.Errorf("Failed to request app-state recovery for 'regular': %v", rerr)
+	} else {
+		logger.Infof("Requested app-state recovery for 'regular' from phone; associations will populate once it responds")
+	}
+}
+
+// sendLabelPatch pushes a label app-state patch to WhatsApp, recovering from a
+// desynced `regular` collection. Label definitions and chat/label associations
+// all live in WAPatchRegular; if that collection drifts (missing version row or
+// mismatching LTHash) every write fails with a 409 conflict. On such a failure we
+// force a full re-sync; if the collection is corrupted beyond a resync we request
+// a fatal recovery from the phone and ask the caller to retry once it lands.
+func sendLabelPatch(client *whatsmeow.Client, patch appstate.PatchInfo) error {
+	err := client.SendAppState(context.Background(), patch)
+	if err == nil || !appStateConflict(err) {
+		return err
+	}
+	fmt.Printf("Label app-state conflict, forcing full re-sync of 'regular': %v\n", err)
+	ferr := client.FetchAppState(context.Background(), appstate.WAPatchRegular, true, false)
+	if ferr == nil {
+		return client.SendAppState(context.Background(), patch)
+	}
+	if !isLTHashMismatch(ferr) {
+		return fmt.Errorf("app state re-sync failed after conflict (%v): %w", err, ferr)
+	}
+	// Corrupted collection: a resync can't fix it. Trigger recovery from the phone.
+	if rerr := recoverAppState(client, appstate.WAPatchRegular); rerr != nil {
+		return fmt.Errorf("app state corrupted and recovery request failed (%v): %w", ferr, rerr)
+	}
+	return fmt.Errorf("the 'regular' app-state collection is corrupted; requested a fatal recovery from your phone (keep it online) — retry in a few seconds")
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// Handler for sending messages
@@ -1657,6 +1741,75 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	// Handler for forcing a full re-sync of an app-state collection. Defaults to
+	// the `regular` collection (labels + chat/label associations), which is the
+	// one prone to desync (missing version / mismatching LTHash). Use this to
+	// recover label management without restarting the bridge.
+	http.HandleFunc("/api/appstate/resync", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Name string `json:"name"`
+		}
+		// Body is optional; ignore decode errors and fall back to the default.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		name := appstate.WAPatchRegular
+		if req.Name != "" {
+			name = appstate.WAPatchName(req.Name)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := client.FetchAppState(context.Background(), name, true, false); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to re-sync app state '%s': %v", name, err),
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Re-synced app state '%s'", name),
+		})
+	})
+
+	// Handler for requesting a fatal recovery of an app-state collection from the
+	// phone. Use this when a resync fails with a mismatching LTHash (corrupted
+	// collection). Defaults to `regular` (labels + chat/label associations). The
+	// phone must be online; recovery completes asynchronously on the event stream.
+	http.HandleFunc("/api/appstate/recover", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		name := appstate.WAPatchRegular
+		if req.Name != "" {
+			name = appstate.WAPatchName(req.Name)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := recoverAppState(client, name); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to request recovery for '%s': %v", name, err),
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Requested fatal recovery for '%s' from phone; keep it online. Associations populate once it responds.", name),
+		})
+	})
+
 	// Handler for creating a new label
 	http.HandleFunc("/api/labels/create", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1698,7 +1851,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send to WhatsApp via app state
 		patch := appstate.BuildLabelEdit(newID, req.Name, req.Color, false)
-		err = client.SendAppState(context.Background(), patch)
+		err = sendLabelPatch(client, patch)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1797,7 +1950,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send to WhatsApp
 		patch := appstate.BuildLabelEdit(req.LabelID, name, color, false)
-		err = client.SendAppState(context.Background(), patch)
+		err = sendLabelPatch(client, patch)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1877,7 +2030,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send to WhatsApp
 		patch := appstate.BuildLabelEdit(req.LabelID, label.Name, label.Color, true)
-		err = client.SendAppState(context.Background(), patch)
+		err = sendLabelPatch(client, patch)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1952,7 +2105,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send to WhatsApp
 		patch := appstate.BuildLabelChat(targetJID, req.LabelID, true)
-		err = client.SendAppState(context.Background(), patch)
+		err = sendLabelPatch(client, patch)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2005,7 +2158,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send to WhatsApp
 		patch := appstate.BuildLabelChat(targetJID, req.LabelID, false)
-		err = client.SendAppState(context.Background(), patch)
+		err = sendLabelPatch(client, patch)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2066,12 +2219,24 @@ func handleLabelEdit(messageStore *MessageStore, evt *events.LabelEdit, logger w
 }
 
 // Handle label association events (add/remove labels from chats)
-func handleLabelAssociationChat(messageStore *MessageStore, evt *events.LabelAssociationChat, logger waLog.Logger) {
+func handleLabelAssociationChat(client *whatsmeow.Client, messageStore *MessageStore, evt *events.LabelAssociationChat, logger waLog.Logger) {
 	if evt == nil || evt.Action == nil {
 		return
 	}
 
-	chatJID := evt.JID.String()
+	// Label associations arrive keyed by LID (`@lid`) JIDs, but chats are stored
+	// under their resolved phone-number JIDs. Resolve LID -> phone JID so the row
+	// matches the chats table (otherwise the chat_labels foreign key fails and the
+	// association is silently dropped).
+	jid := evt.JID
+	if jid.Server == types.HiddenUserServer {
+		if pnJID, rerr := client.Store.LIDs.GetPNForLID(context.Background(), jid.ToNonAD()); rerr == nil && !pnJID.IsEmpty() {
+			jid = pnJID.ToNonAD()
+		} else {
+			logger.Warnf("Could not resolve LID %s to a phone JID for label association", jid)
+		}
+	}
+	chatJID := jid.String()
 	labelID := evt.LabelID
 	labeled := evt.Action.GetLabeled()
 
@@ -2135,6 +2300,12 @@ func main() {
 		return
 	}
 
+	// Emit app-state mutations as events during full syncs and fatal recoveries.
+	// Without this, a full/recovery sync of the `regular` collection fixes the
+	// hash but never dispatches LabelAssociationChat events, so chat_labels would
+	// stay empty. We need those events to repopulate the label associations.
+	client.EmitAppStateEventsOnFullSync = true
+
 	// Initialize message store
 	messageStore, err := NewMessageStore()
 	if err != nil {
@@ -2164,7 +2335,7 @@ func main() {
 			handleLabelEdit(messageStore, v, logger)
 
 		case *events.LabelAssociationChat:
-			handleLabelAssociationChat(messageStore, v, logger)
+			handleLabelAssociationChat(client, messageStore, v, logger)
 		}
 	})
 
@@ -2219,6 +2390,15 @@ func main() {
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+
+	// The `regular` app-state collection (labels + chat/label associations) can end
+	// up unsynced or desynced (missing version row / mismatching LTHash), which
+	// breaks every label operation and leaves chat_labels empty. Force a full sync
+	// on startup to self-heal; it re-emits association events that repopulate the DB.
+	go func() {
+		logger.Infof("Syncing 'regular' app state (labels + chat/label associations)...")
+		syncRegularAppState(client, logger)
+	}()
 
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
