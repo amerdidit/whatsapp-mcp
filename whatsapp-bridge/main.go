@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -1196,23 +1197,18 @@ func extractDirectPathFromURL(url string) string {
 }
 
 // appStateConflict reports whether an error from SendAppState indicates the local
-// copy of an app-state collection is stale or corrupted (server 409 conflict or a
-// mismatching LTHash). These are recoverable by forcing a full re-sync.
+// copy of an app-state collection is stale or corrupted (server-side update
+// conflict or a mismatching LTHash). These are recoverable by forcing a full
+// re-sync. whatsmeow wraps both sentinels with %w, so errors.Is is reliable.
 func appStateConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "conflict") ||
-		strings.Contains(msg, "LTHash") ||
-		strings.Contains(msg, "mismatching")
+	return errors.Is(err, whatsmeow.ErrAppStateUpdate) || errors.Is(err, appstate.ErrMismatchingLTHash)
 }
 
 // isLTHashMismatch reports whether an app-state error is a corrupted-hash error
 // that a normal (re-)sync cannot fix. The only reliable recovery is to request a
 // fresh authoritative copy of the collection from the primary device (the phone).
 func isLTHashMismatch(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "mismatching LTHash")
+	return errors.Is(err, appstate.ErrMismatchingLTHash)
 }
 
 // recoverAppState asks the primary device (the phone) to send an authoritative,
@@ -2393,8 +2389,9 @@ func main() {
 
 	// The `regular` app-state collection (labels + chat/label associations) can end
 	// up unsynced or desynced (missing version row / mismatching LTHash), which
-	// breaks every label operation and leaves chat_labels empty. Force a full sync
-	// on startup to self-heal; it re-emits association events that repopulate the DB.
+	// breaks every label operation and leaves chat_labels empty. Sync it on startup
+	// to self-heal a never-synced collection (falling back to fatal recovery on a
+	// corrupted LTHash); see syncRegularAppState for why it won't wipe good state.
 	go func() {
 		logger.Infof("Syncing 'regular' app state (labels + chat/label associations)...")
 		syncRegularAppState(client, logger)
